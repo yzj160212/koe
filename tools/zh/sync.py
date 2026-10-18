@@ -31,7 +31,6 @@ Exit codes: 0 nothing to do or success, 1 conflict/failure, 2 bad environment.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -41,7 +40,6 @@ import tempfile
 from pathlib import Path
 
 REPO_DEFAULT = Path(__file__).resolve().parents[2]
-STATE_REL = "tools/zh/state.json"
 PATCH_REL = "tools/zh/localize.patch"
 TRANSLATE_REL = "tools/zh/translate.py"
 BRANCH = "zh"
@@ -92,20 +90,6 @@ def run(args: list[str], cwd: Path, check: bool = True, input_text: str | None =
 def tag_sort_key(tag: str) -> tuple[int, int, int]:
     m = UPSTREAM_TAG_RE.match(tag)
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else (0, 0, 0)
-
-
-def load_state(repo: Path) -> dict:
-    path = repo / STATE_REL
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-
-
-def save_state(repo: Path, state: dict) -> None:
-    (repo / STATE_REL).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
 def conflicted_files(worktree: Path) -> list[str]:
@@ -218,7 +202,7 @@ def main() -> int:
     ap.add_argument("--worktree", default=None, help="scratch worktree path (default: a temp dir)")
     ap.add_argument("--skip-translate", action="store_true", help="do not fill newly added keys")
     ap.add_argument("--no-push", action="store_true", help="build the branch but do not push")
-    ap.add_argument("--force", action="store_true", help="rebuild even if state.json says we are current")
+    ap.add_argument("--force", action="store_true", help="rebuild even when the zh branch already matches the target tag")
     ap.add_argument("--keep-worktree", action="store_true", help="leave the scratch worktree in place")
     args = ap.parse_args()
 
@@ -234,14 +218,8 @@ def main() -> int:
             return 2
 
     # Only the tracked tooling may be dirty; unrelated edits elsewhere are fine
-    # because the build happens in a separate worktree. state.json is excluded:
-    # sync.py writes it on success, so leaving it modified between runs is
-    # expected.
-    touched = "\n".join(
-        line
-        for line in run(["git", "status", "--porcelain", "--", "tools/zh"], repo).stdout.splitlines()
-        if not line.rstrip().endswith("tools/zh/state.json")
-    ).strip()
+    # because the build happens in a separate worktree.
+    touched = run(["git", "status", "--porcelain", "--", "tools/zh"], repo).stdout.strip()
     if touched:
         log("error: tools/zh has uncommitted changes; commit them first so the rebuild")
         log("       can read a known-good patch:")
@@ -268,15 +246,28 @@ def main() -> int:
         log("error: no upstream release tag found")
         return 2
 
-    state = load_state(repo)
-    synced = state.get("synced_tag")
-    log(f"newest upstream tag: {target_tag}   last synced: {synced or '(never)'}")
+    # The zh branch is always "<tag> + one localization commit", so which tag it
+    # was built on is derivable from the branch itself — no state file needed.
+    synced = None
+    branch_sha = run(["git", "rev-parse", "--verify", f"refs/heads/{BRANCH}"], repo, check=False)
+    if branch_sha.returncode == 0:
+        parent = run(["git", "rev-parse", f"refs/heads/{BRANCH}^"], repo, check=False)
+        if parent.returncode == 0:
+            sha = parent.stdout.strip()
+            for tag in tags:
+                if run(["git", "rev-parse", tag], repo).stdout.strip() == sha:
+                    synced = tag
+                    break
+            if synced is None:
+                synced = f"<unknown:{sha[:9]}>"
+
+    log(f"newest upstream tag: {target_tag}   current {BRANCH} built on: {synced or '(branch absent)'}")
 
     if not args.force and synced == target_tag:
         log("nothing to do — already in sync")
         return 0
     if not args.force and synced and tag_sort_key(target_tag) < tag_sort_key(synced):
-        log(f"error: {target_tag} is older than synced {synced}; refusing to go backwards")
+        log(f"error: {target_tag} is older than the current {BRANCH} base {synced}; refusing to go backwards")
         return 1
 
     patch = (repo / PATCH_REL).read_text(encoding="utf-8")
@@ -381,13 +372,7 @@ def main() -> int:
             log(f"error: could not update the {BRANCH} branch (is it checked out elsewhere?)")
             log(moved.stderr.strip())
             return 1
-        log(f"branch {BRANCH} -> {commit[:9]}")
-
-        state["synced_tag"] = target_tag
-        state["synced_commit"] = commit
-        state["synced_at"] = run(["git", "show", "-s", "--format=%cI", commit], repo).stdout.strip()
-        save_state(repo, state)
-        log(f"state written: {STATE_REL}")
+        log(f"branch {BRANCH} -> {commit[:9]}  (base {target_tag})")
 
         if args.no_push:
             log("--no-push: built locally; run `git push --force-with-lease "
