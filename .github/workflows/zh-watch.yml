@@ -1,27 +1,28 @@
 name: 上游版本监控
 
-# Watches missuo/koe for a new release and, when one appears, rebuilds the
-# Chinese branch and then builds + publishes the DMG — all inside this one
-# workflow.
+# Polls missuo/koe for a new release tag and, when one appears, rebuilds the
+# Chinese branch and starts the build.
 #
-# Why one workflow instead of "poll here, build there":
-# a push made with the automatic GITHUB_TOKEN does not start other workflows
-# ("other GITHUB_TOKEN-triggered events do not create workflow runs at all"), so
-# a separate build-on-push workflow would silently never run after an
-# automated sync. Triggering the build as a job inside the same run sidesteps
-# that rule entirely.
+# How the build gets started
+# --------------------------
+# A push made with the automatic GITHUB_TOKEN does not start other workflows:
+# "other GITHUB_TOKEN-triggered events do not create workflow runs at all".
+# `workflow_dispatch` is explicitly exempt from that rule, so this workflow
+# pushes the rebuilt branch and then dispatches 中文版构建 (zh-release.yml)
+# against it. One definition of the build, two ways to reach it.
 #
-# Known GitHub limitation: in a public repository a scheduled workflow is
-# disabled automatically after 60 days with no repository activity. Upstream
-# releases every couple of weeks, which counts as activity on THEIR repo, not on
-# yours — so an extremely quiet period can switch this off. Every run therefore
-# also records a heartbeat commit, which both keeps the schedule alive and makes
-# "monitoring stopped" visible in the history. Re-enable from the Actions tab if
-# it ever gets disabled.
+# Why a heartbeat commit
+# ----------------------
+# GitHub disables scheduled workflows in a public repository after 60 days
+# without repository activity. Upstream releasing counts as activity on THEIR
+# repository, not on this fork, so a quiet period could silently switch the
+# watcher off. The heartbeat keeps it enabled and makes "last successful check"
+# visible in the history. If it does get disabled, re-enable it from the Actions
+# tab; the manual button always works.
 on:
   schedule:
-    # Upstream releases roughly every two weeks, so a few checks a day is
-    # plenty. Off the hour to avoid GitHub's high-load window.
+    # Upstream releases roughly every two weeks, so a few checks a day is plenty.
+    # Off the hour to avoid GitHub's documented high-load window.
     - cron: "17 3,15 * * *"
   workflow_dispatch:
 
@@ -34,11 +35,11 @@ concurrency:
 
 jobs:
   sync:
-    name: 检查上游版本
+    name: 检查上游版本并重建
     runs-on: ubuntu-latest
     outputs:
-      updated: ${{ steps.sync.outputs.updated }}
-      tag: ${{ steps.sync.outputs.tag }}
+      updated: ${{ steps.compare.outputs.updated }}
+      tag: ${{ steps.compare.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -47,22 +48,21 @@ jobs:
           ref: zh-tooling
 
       - name: Compare upstream tags
-        id: sync
+        id: compare
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Pure API comparison: the runner has no upstream history, and the tag
-          # objects are lightweight commits upstream, so parent-SHA matching
-          # against the tag list is enough — no clone or fetch needed.
           UPSTREAM=missuo/koe
           FORK="$GITHUB_REPOSITORY"
 
           NEWEST=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
           echo "newest upstream release: $NEWEST"
 
-          # zh is always "<upstream tag> + one localization commit", so the tag it
-          # was built on is the parent of its head commit.
+          # zh is always "<upstream tag> + one localization commit", so the tag
+          # it was built on is the parent of its head commit. Upstream's tags are
+          # lightweight commits, so a direct SHA comparison against the tag list
+          # is enough — no clone or fetch needed.
           BASE_SHA=$(gh api "repos/$FORK/commits/zh" --jq '.parents[0].sha' 2>/dev/null || echo "")
           BASE_TAG=""
           if [ -n "$BASE_SHA" ]; then
@@ -82,26 +82,24 @@ jobs:
           fi
 
       - name: Heartbeat
-        # Keeps the 60-day schedule requirement satisfied and leaves a trace in
-        # the history showing the watcher is alive.
         if: always()
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p .watch
-          date -u +"%Y-%m-%dT%H:%M:%SZ" > .watch/last-check
+          {
+            echo "last_check: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "newest_upstream: ${{ steps.compare.outputs.tag || 'unknown' }}"
+            echo "updated: ${{ steps.compare.outputs.updated }}"
+          } > .watch/last-check
           git add .watch/last-check
           git commit -qm "chore(watch): upstream check $(date -u +%Y-%m-%d)" || true
           git push origin HEAD:zh-tooling || true
 
-      - name: Rebuild the Chinese branch on the new tag
-        if: steps.sync.outputs.updated == 'true'
+      - name: Rebuild the Chinese branch
+        if: steps.compare.outputs.updated == 'true'
         env:
-          # The local gateway that normally serves translations is not routable
-          # from a runner, so the sync falls back to leaving new English strings
-          # in place rather than refusing to build. Run tools/zh/sync.py locally
-          # afterwards to translate them.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -112,184 +110,26 @@ jobs:
           git remote add upstream https://github.com/missuo/koe.git
           git fetch --no-tags upstream --tags
 
+          # The runner cannot reach the local translation gateway (it lives on a
+          # workstation), so --allow-untranslated leaves any newly added English
+          # strings in place instead of refusing to build. Running
+          # tools/zh/sync.py locally afterwards translates them properly.
           python3 tools/zh/sync.py \
-            --tag "${{ steps.sync.outputs.tag }}" \
+            --tag "${{ steps.compare.outputs.tag }}" \
             --upstream upstream \
             --target origin \
             --allow-untranslated \
             --force
 
-  build:
-    name: 构建并发布 DMG
-    needs: sync
-    if: needs.sync.outputs.updated == 'true'
-    runs-on: macos-26
-
-    steps:
-      - name: Checkout the rebuilt branch
-        uses: actions/checkout@v7
-        with:
-          ref: zh
-
-      - name: Read upstream version
-        id: version
-        run: |
-          set -euo pipefail
-          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" KoeApp/Koe/Info.plist)
-          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" KoeApp/Koe/Info.plist)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
-          echo "tag=zh-v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "built on upstream $VERSION ($BUILD)"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: zh-localization
-
-      - name: Install dependencies
-        run: |
-          brew untap aws/tap 2>/dev/null || true
-          brew install xcodegen cmake
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: 1
-
-      - name: Cache Swift packages
-        uses: actions/cache@v6
-        with:
-          path: KoeApp/build-ci/SourcePackages
-          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('KoeApp/project.yml', 'Packages/**/Package.swift', 'Packages/**/Package.resolved') }}
-          restore-keys: |
-            spm-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Build CLI
-        run: cargo build --package koe-cli --release --target aarch64-apple-darwin
-
-      - name: Generate Xcode project
-        run: xcodegen generate --spec project.yml
-        working-directory: KoeApp
-
-      - name: Build app
-        run: |
-          set -euo pipefail
-          xcodebuild \
-            -project Koe.xcodeproj \
-            -scheme Koe \
-            -configuration Release \
-            -skipPackagePluginValidation \
-            -skipMacroValidation \
-            -derivedDataPath build-ci/zh \
-            -clonedSourcePackagesDirPath build-ci/SourcePackages \
-            ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=NO \
-            build
-        working-directory: KoeApp
-
-      - name: Neutralize Sparkle auto-updates
-        run: |
-          set -euo pipefail
-          APP="KoeApp/build-ci/zh/Build/Products/Release/Koe.app"
-          PLIST="$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$PLIST" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Delete :SUScheduledCheckInterval" "$PLIST" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$PLIST" 2>/dev/null || true
-          echo "--- Sparkle keys now ---"
-          /usr/libexec/PlistBuddy -c "Print" "$PLIST" | grep -i sparkle || echo "(no Sparkle keys remain)"
-
-      - name: Package app
-        # Uploads the .app for the DMG step; no CODESIGN_IDENTITY means ad-hoc
-        # signing, which is deliberate for a personal build.
-        run: |
-          set -euo pipefail
-          .github/scripts/package-app.sh \
-            "KoeApp/build-ci/zh/Build/Products/Release/Koe.app" \
-            "target/aarch64-apple-darwin/release/koe" \
-            "Koe-zh-macOS-arm64.zip"
-
-      - name: Build the DMG
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/stage && mkdir -p /tmp/stage
-          ditto -x -k Koe-zh-macOS-arm64.zip /tmp/stage
-          tools/zh/make-dmg.sh /tmp/stage/Koe.app "Koe-zh-macOS-arm64.dmg" "Koe 简体中文版"
-
-      - name: Verify the packaged app
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/verify && mkdir -p /tmp/verify
-          ditto -x -k Koe-zh-macOS-arm64.zip /tmp/verify
-          APP=/tmp/verify/Koe.app
-          test -d "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-
-          echo "--- arm64 only ---"
-          lipo -archs "$APP/Contents/MacOS/Koe"
-
-          echo "--- localization present ---"
-          ls "$APP/Contents/Resources/" | grep -E "^(en|zh-Hans)\.lproj$"
-
-          # xcodebuild compiles .strings into a binary plist, so this has to be
-          # read with plutil rather than counted with grep.
-          PLIST="$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
-          test -f "$PLIST"
-          ZH_KEYS=$(plutil -convert json -o - "$PLIST" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
-          EN_KEYS=$(plutil -convert json -o - "$APP/Contents/Resources/en.lproj/Localizable.strings" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
-          echo "zh-Hans keys: $ZH_KEYS   en keys: $EN_KEYS"
-          if [ "$ZH_KEYS" -ne "$EN_KEYS" ]; then
-            echo "::error::zh-Hans has $ZH_KEYS keys but en has $EN_KEYS — the app would show raw keys"
-            exit 1
-          fi
-          if [ "$ZH_KEYS" -lt 200 ]; then
-            echo "::error::only $ZH_KEYS Chinese keys — the fork's catalogue did not reach the build"
-            exit 1
-          fi
-
-          echo "--- Sparkle neutralized ---"
-          /usr/libexec/PlistBuddy -c "Print :SUEnableAutomaticChecks" "$APP/Contents/Info.plist"
-          for key in SUFeedURL SUPublicEDKey; do
-            if /usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist" 2>/dev/null; then
-              echo "::error::$key is still present — the build could update itself to the English release"
-              exit 1
-            fi
-          done
-          echo "ok — $ZH_KEYS Chinese strings, arm64, Sparkle disabled"
-
-      - name: Publish the release
+      - name: Start the build
+        if: steps.compare.outputs.updated == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
-          VERSION="${{ steps.version.outputs.version }}"
-
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            cat > "$RUNNER_TEMP/notes.md" <<EOF
-          Koe 简体中文版，基于上游 [\`${{ needs.sync.outputs.tag }}\`](https://github.com/missuo/koe/releases/tag/${{ needs.sync.outputs.tag }}) 自动构建。
-
-          - 界面简体中文本地化（设置窗口、首次配置向导、状态栏、悬浮提示）
-          - Apple Silicon (arm64) 专用
-          - **已关闭 Sparkle 自动更新**，防止被官方英文版静默覆盖
-          - ad-hoc 签名，未做公证；首次打开需放行
-
-          安装（DMG 拖入 Applications，或一行命令）：
-
-          \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/zh-tooling/tools/zh/install.sh | bash
-          \`\`\`
-          EOF
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "Koe 简体中文版 v$VERSION" \
-              --notes-file "$RUNNER_TEMP/notes.md"
-          fi
-
-          gh release upload "$TAG" \
-            Koe-zh-macOS-arm64.dmg \
-            Koe-zh-macOS-arm64.zip \
-            --repo "$GITHUB_REPOSITORY" --clobber
-          echo "published $TAG (dmg + zip)"
+          # workflow_dispatch is exempt from the GITHUB_TOKEN recursion rule that
+          # stops a bot push from triggering workflows.
+          gh workflow run zh-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref zh
+          echo "dispatched 中文版构建 against zh@${{ steps.compare.outputs.tag }}"

@@ -1,9 +1,13 @@
 name: 中文版构建
 
-# Triggered by the automated sync: tools/zh/sync.py rebuilds the `zh` branch on
-# the newest upstream release tag and force-pushes it, which starts this build.
-# The manual button works too (workflow_dispatch requires the file on the
-# default branch, which is why a copy lives on main as well).
+# The single definition of "build the Chinese app and publish it".
+#
+# Two ways in:
+#   * push to `zh` — tools/zh/sync.py rebuilt the branch locally;
+#   * workflow_dispatch — 上游版本监控 (zh-watch.yml) pushes the rebuilt branch
+#     itself, and a bot push cannot start another workflow, but dispatching one
+#     is allowed.
+# Also runnable by hand from the Actions tab.
 on:
   push:
     branches:
@@ -20,7 +24,11 @@ jobs:
 
     steps:
       - name: Checkout
+        # On a dispatch the caller chooses the ref, so honour it explicitly
+        # instead of implicitly building the default branch.
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
 
       - name: Read upstream version
         id: version
@@ -100,16 +108,27 @@ jobs:
 
       - name: Package app
         # No CODESIGN_IDENTITY is exported, so the shared packaging script
-        # ad-hoc signs. That is deliberate: an unsigned/ad-hoc build carries no
-        # Developer ID and therefore cannot be notarized, which is exactly what
-        # keeps this a personal build rather than a redistributed binary.
+        # ad-hoc signs. That is deliberate: an ad-hoc build carries no Developer
+        # ID and therefore cannot be notarized, which is what keeps this a
+        # personal build rather than a redistributed binary.
         run: |
           set -euo pipefail
           .github/scripts/package-app.sh \
             "KoeApp/build-ci/zh/Build/Products/Release/Koe.app" \
             "target/aarch64-apple-darwin/release/koe" \
             "Koe-zh-macOS-arm64.zip"
-          ls -lh Koe-zh-macOS-arm64.zip
+
+      - name: Build the DMG
+        # The DMG is the user-facing artifact (drag into Applications); the zip
+        # is kept because install.sh downloads it.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/stage && mkdir -p /tmp/stage
+          ditto -x -k Koe-zh-macOS-arm64.zip /tmp/stage
+          tools/zh/make-dmg.sh \
+            /tmp/stage/Koe.app \
+            "Koe-zh-macOS-arm64.dmg" \
+            "Koe 简体中文版"
 
       - name: Verify the packaged app
         run: |
@@ -166,14 +185,16 @@ jobs:
             cat > "$RUNNER_TEMP/notes.md" <<EOF
           Koe 简体中文版，基于上游 [\`$TAG\`](https://github.com/missuo/koe/releases) 构建。
 
-          - 界面全量简体中文本地化（设置窗口、首次配置向导、状态栏、悬浮提示）
+          - 界面简体中文本地化（设置窗口、首次配置向导、状态栏、悬浮提示）
+          - **Apple Silicon (arm64) 专用**
           - **已关闭 Sparkle 自动更新**，防止被官方英文版静默覆盖
           - ad-hoc 签名，未做公证；首次打开需放行
 
-          安装：
+          安装：下载 \`Koe-zh-macOS-arm64.dmg\`，把 Koe 拖进「应用程序」即可。
+          或用一行命令（走 zip）：
 
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/tools/zh/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/zh-tooling/tools/zh/install.sh | bash
           \`\`\`
           EOF
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
@@ -181,6 +202,8 @@ jobs:
               --notes-file "$RUNNER_TEMP/notes.md"
           fi
 
-          gh release upload "$TAG" Koe-zh-macOS-arm64.zip \
+          gh release upload "$TAG" \
+            Koe-zh-macOS-arm64.dmg \
+            Koe-zh-macOS-arm64.zip \
             --repo "$GITHUB_REPOSITORY" --clobber
-          echo "uploaded Koe-zh-macOS-arm64.zip to $TAG"
+          echo "uploaded dmg + zip to $TAG"

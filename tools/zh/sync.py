@@ -45,11 +45,17 @@ TRANSLATE_REL = "tools/zh/translate.py"
 BRANCH = "zh"
 UPSTREAM_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
-# The build workflow lives on main with the rest of the tooling and is copied
-# into the rebuilt zh branch, because a push only triggers workflows that exist
-# in the pushed ref.
+# The build workflow lives on zh-tooling with the rest of the tooling and is
+# copied into the rebuilt zh branch, because a push only triggers workflows that
+# exist in the pushed ref. make-dmg.sh is copied for the same reason: the build
+# job checks out zh, and a script that exists only on another branch would make
+# the DMG step fail.
 WORKFLOW_SRC_REL = ".github/workflows/zh-release.yml"
 WORKFLOW_DST_REL = ".github/workflows/zh-release.yml"
+BUILD_ASSETS = [
+    ("tools/zh/make-dmg.sh", "tools/zh/make-dmg.sh"),
+    ("tools/zh/install.sh", "tools/zh/install.sh"),
+]
 
 # The catalogue this fork carries. It is written to the *app repo* as plain
 # data: the fork's Chinese coverage is a superset of upstream's, so it is
@@ -357,6 +363,19 @@ def main() -> int:
         workflow_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(workflow_src, workflow_dst)
         log(f"installed workflow at {WORKFLOW_DST_REL}")
+
+        # The build job checks out this branch, so everything it needs to run
+        # has to exist here too — not just on the tooling branch.
+        for src_rel, dst_rel in BUILD_ASSETS:
+            src = repo / src_rel
+            if not src.exists():
+                log(f"error: {src_rel} is missing; the build would lack it")
+                return 1
+            dst = worktree / dst_rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            dst.chmod(dst.stat().st_mode | 0o755)
+            log(f"installed {dst_rel}")
 
         if not args.skip_translate:
             # Probe first: an unreachable gateway (the usual CI situation, since
