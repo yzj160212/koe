@@ -1,0 +1,164 @@
+name: 中文版构建
+
+# Triggered by the automated sync: tools/zh/sync.py rebuilds the `zh` branch on
+# the newest upstream release tag and force-pushes it, which starts this build.
+# The manual button works too (workflow_dispatch requires the file on the
+# default branch, which is why a copy lives on main as well).
+on:
+  push:
+    branches:
+      - zh
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-zh:
+    name: Build Koe 简体中文版
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Read upstream version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" KoeApp/Koe/Info.plist)
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" KoeApp/Koe/Info.plist)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=zh-v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "zh built on upstream $VERSION ($BUILD)"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: zh-localization
+
+      - name: Install dependencies
+        run: |
+          brew untap aws/tap 2>/dev/null || true
+          brew install xcodegen cmake
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+
+      - name: Cache Swift packages
+        uses: actions/cache@v6
+        with:
+          path: KoeApp/build-ci/SourcePackages
+          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('KoeApp/project.yml', 'Packages/**/Package.swift', 'Packages/**/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build CLI
+        run: cargo build --package koe-cli --release --target aarch64-apple-darwin
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+        working-directory: KoeApp
+
+      - name: Build app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Koe.xcodeproj \
+            -scheme Koe \
+            -configuration Release \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            -derivedDataPath build-ci/zh \
+            -clonedSourcePackagesDirPath build-ci/SourcePackages \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+        working-directory: KoeApp
+
+      - name: Neutralize Sparkle auto-updates
+        # The upstream feed URL points at missuo/koe's appcast. Left alone, a
+        # locally built Chinese app would silently replace itself with the
+        # official English build within SU ScheduledCheckInterval. Signing keys
+        # differ so the signature check would fail, but disabling the check
+        # outright is the only reliable way to keep this build Chinese.
+        run: |
+          set -euo pipefail
+          APP="KoeApp/build-ci/zh/Build/Products/Release/Koe.app"
+          PLIST="$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :SUScheduledCheckInterval" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$PLIST" 2>/dev/null || true
+          echo "--- Sparkle keys now ---"
+          /usr/libexec/PlistBuddy -c "Print" "$PLIST" | grep -i sparkle || echo "(no Sparkle keys remain)"
+
+      - name: Package app
+        # No CODESIGN_IDENTITY is exported, so the shared packaging script
+        # ad-hoc signs. That is deliberate: an unsigned/ad-hoc build carries no
+        # Developer ID and therefore cannot be notarized, which is exactly what
+        # keeps this a personal build rather than a redistributed binary.
+        run: |
+          set -euo pipefail
+          .github/scripts/package-app.sh \
+            "KoeApp/build-ci/zh/Build/Products/Release/Koe.app" \
+            "target/aarch64-apple-darwin/release/koe" \
+            "Koe-zh-macOS-arm64.zip"
+          ls -lh Koe-zh-macOS-arm64.zip
+
+      - name: Verify the packaged app
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          ditto -x -k Koe-zh-macOS-arm64.zip /tmp/verify
+          APP=/tmp/verify/Koe.app
+          test -d "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "--- localization present ---"
+          ls "$APP/Contents/Resources/" | grep -E "^(en|zh-Hans)\.lproj$"
+          test -f "$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+          echo "--- zh catalogue key count ---"
+          grep -cE '^"' "$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+          echo "--- Sparkle neutralized ---"
+          /usr/libexec/PlistBuddy -c "Print :SUEnableAutomaticChecks" "$APP/Contents/Info.plist"
+          if /usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$APP/Contents/Info.plist" 2>/dev/null; then
+            echo "::error::SUFeedURL is still present — the build could update itself to the English release"
+            exit 1
+          fi
+          echo "ok"
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Koe 简体中文版，基于上游 [\`$TAG\`](https://github.com/missuo/koe/releases) 构建。
+
+          - 界面全量简体中文本地化（设置窗口、首次配置向导、状态栏、悬浮提示）
+          - **已关闭 Sparkle 自动更新**，防止被官方英文版静默覆盖
+          - ad-hoc 签名，未做公证；首次打开需放行
+
+          安装：
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/tools/zh/install.sh | bash
+          \`\`\`
+          EOF
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Koe 简体中文版 v$VERSION" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+          gh release upload "$TAG" Koe-zh-macOS-arm64.zip \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "uploaded Koe-zh-macOS-arm64.zip to $TAG"
