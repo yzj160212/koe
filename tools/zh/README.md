@@ -100,6 +100,25 @@ merge 冲突。
 代价只有一个：从网上下载后 macOS 会打上隔离标记，首次打开需要放行
 （`install.sh` 会问你要不要清掉这个标记）。
 
+## 仓库 remote 命名
+
+遵循 GitHub 惯例，**这条别改**：
+
+```
+origin    https://github.com/<你的账号>/koe.git     ← 你的 fork
+upstream  https://github.com/missuo/koe.git         ← 官方仓库
+```
+
+`gh` 在 fork 目录里默认会解析到 `upstream`（官方），所以本仓库已用
+`gh repo set-default` 固定成你的 fork。如果哪天 `gh repo view` 又显示成
+`missuo/koe`，在这个目录里重跑一次：
+
+```bash
+gh repo set-default $(gh api user --jq .login)/koe
+```
+
+本仓库所有脚本都显式传 `--repo`，不受这个解析影响。
+
 ## 自动监控的两个已知限制
 
 理解这两点，才不会在它们发生时以为坏了。
