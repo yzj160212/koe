@@ -130,7 +130,7 @@ def validate(source: str, translated: str) -> str | None:
     return None
 
 
-def chat(gateway: str, model: str, api_key: str, prompt: str, timeout: int = 180) -> str:
+def chat(gateway: str, model: str, api_key: str, prompt: str, timeout: int = 90) -> str:
     body = json.dumps(
         {
             "model": model,
@@ -250,7 +250,26 @@ def main() -> int:
     ap.add_argument("--only", nargs="*", default=None, help="translate only these keys")
     ap.add_argument("--dry-run", action="store_true", help="report missing keys without calling the gateway")
     ap.add_argument("--check", action="store_true", help="verify key parity and format specifiers, then exit")
+    ap.add_argument(
+        "--probe",
+        action="store_true",
+        help="check the gateway is reachable and exit (0 reachable, 1 not) — lets a caller "
+        "decide whether to attempt translation before paying a long connection timeout",
+    )
     args = ap.parse_args()
+
+    if args.probe:
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(args.gateway.rstrip("/") + "/models", timeout=5) as resp:
+                ok = 200 <= resp.status < 300
+        except Exception as exc:  # noqa: BLE001 - any failure means "not reachable"
+            log(f"gateway {args.gateway} unreachable: {exc}")
+            return 1
+        log(f"gateway {args.gateway} reachable")
+        return 0 if ok else 1
 
     repo = args.repo or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     lproj = os.path.join(repo, "KoeApp", "Koe")

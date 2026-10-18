@@ -193,6 +193,38 @@ def parse_text(translate, path: Path) -> list[tuple[str, str, list[str]]]:
     return entries
 
 
+def fill_untranslated(repo: Path, worktree: Path) -> bool:
+    """Give every key without a Chinese value the English text, in key order.
+
+    Used only when the gateway is unreachable: an app whose new strings show
+    English is far better than no app at all. Returns False if the catalogue
+    could not be rewritten.
+    """
+    try:
+        translate = load_translate_module(repo)
+        en_entries = parse_text(translate, worktree / APP_EN_REL)
+        zh_entries = parse_text(translate, worktree / APP_ZH_REL)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  cannot read the catalogue: {exc}")
+        return False
+
+    zh_by_key = {k: (v, c) for k, v, c in zh_entries}
+    filled = 0
+    out: list[str] = []
+    for key, value, comments in en_entries:
+        if key in zh_by_key:
+            val, cmt = zh_by_key[key]
+            out.extend(cmt)
+            out.append(f'"{key}" = "{val}";')
+        else:
+            out.extend(comments)
+            out.append(f'"{key}" = "{value}";')
+            filled += 1
+    (worktree / APP_ZH_REL).write_text("\n".join(out) + "\n", encoding="utf-8")
+    log(f"  filled {filled} key(s) with the English text")
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=str(REPO_DEFAULT), help="fork checkout root (default: this repo)")
@@ -201,6 +233,12 @@ def main() -> int:
     ap.add_argument("--target", default="fork", help="remote to push the zh branch to (default fork)")
     ap.add_argument("--worktree", default=None, help="scratch worktree path (default: a temp dir)")
     ap.add_argument("--skip-translate", action="store_true", help="do not fill newly added keys")
+    ap.add_argument(
+        "--allow-untranslated",
+        action="store_true",
+        help="when the translation gateway is unreachable, fill the remaining keys with "
+        "the English text instead of failing (used by the unattended nightly sync)",
+    )
     ap.add_argument("--no-push", action="store_true", help="build the branch but do not push")
     ap.add_argument("--force", action="store_true", help="rebuild even when the zh branch already matches the target tag")
     ap.add_argument("--keep-worktree", action="store_true", help="leave the scratch worktree in place")
@@ -328,8 +366,17 @@ def main() -> int:
                 text=True,
             )
             if proc.returncode != 0:
-                log("error: translation failed; nothing committed")
-                return 1
+                if not args.allow_untranslated:
+                    log("error: translation failed; nothing committed")
+                    return 1
+                # Unattended mode: a handful of untranslated keys still yields a
+                # usable Chinese app, whereas refusing to build yields nothing.
+                # Fill the gaps with the English source text and keep the build.
+                log("warning: translation failed — falling back to English text for the")
+                log("         remaining keys so the build can still ship")
+                if not fill_untranslated(repo, worktree):
+                    log("error: could not fill the untranslated keys either; nothing committed")
+                    return 1
 
         log("checking locale parity …")
         chk = subprocess.run(
