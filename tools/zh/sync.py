@@ -4,8 +4,11 @@
 Branch model
 ------------
 
-    fork/main   this tooling (tools/zh/*) — never rebuilt, never touched
-    fork/zh     one release tag + a single localization commit
+    origin/zh-tooling   this tooling (tools/zh/*) — never rebuilt, never touched
+    origin/zh           one release tag + a single localization commit
+
+Remotes follow the usual convention: ``origin`` is your fork and ``upstream`` is
+the official repository.
 
 ``zh`` is always built from scratch on the chosen tag, so its history stays
 linear and the only thing that can conflict is the code-side patch
@@ -235,8 +238,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=str(REPO_DEFAULT), help="fork checkout root (default: this repo)")
     ap.add_argument("--tag", default=None, help="upstream tag to build on (default: newest release tag)")
-    ap.add_argument("--upstream", default="origin", help="remote holding upstream (default origin)")
-    ap.add_argument("--target", default="fork", help="remote to push the zh branch to (default fork)")
+    ap.add_argument(
+        "--upstream",
+        default="upstream",
+        help="remote holding the official repository (default upstream)",
+    )
+    ap.add_argument(
+        "--target",
+        default="origin",
+        help="remote to push the zh branch to — your fork (default origin)",
+    )
     ap.add_argument("--worktree", default=None, help="scratch worktree path (default: a temp dir)")
     ap.add_argument("--skip-translate", action="store_true", help="do not fill newly added keys")
     ap.add_argument(
@@ -258,7 +269,7 @@ def main() -> int:
     for rel in (PATCH_REL, TRANSLATE_REL):
         if not (repo / rel).exists():
             log(f"error: {rel} is missing from {repo}")
-            log("hint: this tooling belongs on fork/main; are you on the right branch?")
+            log("hint: this tooling belongs on the zh-tooling branch; are you on the right branch?")
             return 2
 
     # Only the tracked tooling may be dirty; unrelated edits elsewhere are fine
