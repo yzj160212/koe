@@ -58,6 +58,7 @@ jobs:
 
           NEWEST=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
           echo "newest upstream release: $NEWEST"
+          echo "newest=$NEWEST" >> "$GITHUB_OUTPUT"
 
           # zh is always "<upstream tag> + one localization commit", so the tag
           # it was built on is the parent of its head commit. Upstream's tags are

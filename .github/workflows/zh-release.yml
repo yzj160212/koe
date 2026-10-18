@@ -106,45 +106,37 @@ jobs:
           echo "--- Sparkle keys now ---"
           /usr/libexec/PlistBuddy -c "Print" "$PLIST" | grep -i sparkle || echo "(no Sparkle keys remain)"
 
-      - name: Package app
-        # No CODESIGN_IDENTITY is exported, so the shared packaging script
-        # ad-hoc signs. That is deliberate: an ad-hoc build carries no Developer
-        # ID and therefore cannot be notarized, which is what keeps this a
-        # personal build rather than a redistributed binary.
+      - name: Package the DMG
+        # The DMG is the only artifact, per request. No CODESIGN_IDENTITY is
+        # exported, so the shared packaging script ad-hoc signs: an ad-hoc build
+        # carries no Developer ID and therefore cannot be notarized, which is
+        # what keeps this a personal build rather than a redistributed binary.
         run: |
           set -euo pipefail
+          APP_DIR="KoeApp/build-ci/zh/Build/Products/Release"
           .github/scripts/package-app.sh \
-            "KoeApp/build-ci/zh/Build/Products/Release/Koe.app" \
+            "$APP_DIR/Koe.app" \
             "target/aarch64-apple-darwin/release/koe" \
-            "Koe-zh-macOS-arm64.zip"
-
-      - name: Build the DMG
-        # The DMG is the user-facing artifact (drag into Applications); the zip
-        # is kept because install.sh downloads it.
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/stage && mkdir -p /tmp/stage
-          ditto -x -k Koe-zh-macOS-arm64.zip /tmp/stage
+            "$RUNNER_TEMP/Koe-zh-macOS-arm64.zip"
           tools/zh/make-dmg.sh \
-            /tmp/stage/Koe.app \
+            "$APP_DIR/Koe.app" \
             "Koe-zh-macOS-arm64.dmg" \
             "Koe 简体中文版"
 
-      - name: Verify the packaged app
+      - name: Verify the built app
         run: |
           set -euo pipefail
-          rm -rf /tmp/verify && mkdir -p /tmp/verify
-          ditto -x -k Koe-zh-macOS-arm64.zip /tmp/verify
-          APP=/tmp/verify/Koe.app
-          test -d "$APP"
+          APP="KoeApp/build-ci/zh/Build/Products/Release/Koe.app"
           codesign --verify --deep --strict --verbose=2 "$APP"
+
+          echo "--- arm64 only ---"
+          lipo -archs "$APP/Contents/MacOS/Koe"
 
           echo "--- localization present ---"
           ls "$APP/Contents/Resources/" | grep -E "^(en|zh-Hans)\.lproj$"
 
           # xcodebuild compiles .strings into a binary plist, so this has to be
-          # read with plutil rather than counted with grep. plutil accepts both
-          # encodings, so the check works either way.
+          # read with plutil rather than counted with grep.
           PLIST="$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
           test -f "$PLIST"
           ZH_KEYS=$(plutil -convert json -o - "$PLIST" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
@@ -154,8 +146,6 @@ jobs:
             echo "::error::zh-Hans has $ZH_KEYS keys but en has $EN_KEYS — the app would show raw keys"
             exit 1
           fi
-          # Upstream's own catalogue is 69 keys; a build that fell back to it
-          # would mean the fork's catalogue never made it into the tag.
           if [ "$ZH_KEYS" -lt 200 ]; then
             echo "::error::only $ZH_KEYS Chinese keys — the fork's catalogue did not reach the build"
             exit 1
@@ -163,15 +153,34 @@ jobs:
 
           echo "--- Sparkle neutralized ---"
           /usr/libexec/PlistBuddy -c "Print :SUEnableAutomaticChecks" "$APP/Contents/Info.plist"
-          if /usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$APP/Contents/Info.plist" 2>/dev/null; then
-            echo "::error::SUFeedURL is still present — the build could update itself to the English release"
-            exit 1
-          fi
-          if /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$APP/Contents/Info.plist" 2>/dev/null; then
-            echo "::error::SUPublicEDKey is still present — Sparkle could still verify and install the upstream feed"
-            exit 1
-          fi
-          echo "ok — $ZH_KEYS Chinese strings, Sparkle disabled"
+          for key in SUFeedURL SUPublicEDKey; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist" 2>/dev/null; then
+              echo "::error::$key is still present — the build could update itself to the English release"
+              exit 1
+            fi
+          done
+          echo "ok — $ZH_KEYS Chinese strings, arm64, Sparkle disabled"
+
+      - name: Verify the DMG
+        run: |
+          set -euo pipefail
+          hdiutil verify Koe-zh-macOS-arm64.dmg >/dev/null
+          ATTACH_PLIST="$RUNNER_TEMP/attach.plist"
+          hdiutil attach Koe-zh-macOS-arm64.dmg -nobrowse -readonly -plist > "$ATTACH_PLIST"
+          MOUNT="$(python3 - "$ATTACH_PLIST" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as fh:
+              data = plistlib.load(fh)
+          for entity in data.get("system-entities", []):
+              if entity.get("mount-point"):
+                  print(entity["mount-point"])
+                  break
+          PY
+          )"
+          test -d "$MOUNT/Koe.app"
+          test -L "$MOUNT/Applications"
+          echo "DMG contains Koe.app + Applications symlink"
+          hdiutil detach "$MOUNT" -quiet
 
       - name: Upload to Release
         env:
@@ -191,7 +200,7 @@ jobs:
           - ad-hoc 签名，未做公证；首次打开需放行
 
           安装：下载 \`Koe-zh-macOS-arm64.dmg\`，把 Koe 拖进「应用程序」即可。
-          或用一行命令（走 zip）：
+          或一行命令（同样走 DMG，自动挂载并安装）：
 
           \`\`\`bash
           curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/zh-tooling/tools/zh/install.sh | bash
@@ -204,6 +213,5 @@ jobs:
 
           gh release upload "$TAG" \
             Koe-zh-macOS-arm64.dmg \
-            Koe-zh-macOS-arm64.zip \
             --repo "$GITHUB_REPOSITORY" --clobber
-          echo "uploaded dmg + zip to $TAG"
+          echo "uploaded Koe-zh-macOS-arm64.dmg to $TAG"
