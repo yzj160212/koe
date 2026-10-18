@@ -151,8 +151,14 @@ def main() -> int:
             return 2
 
     # Only the tracked tooling may be dirty; unrelated edits elsewhere are fine
-    # because the build happens in a separate worktree.
-    touched = run(["git", "status", "--porcelain", "--", "tools/zh"], repo).stdout.strip()
+    # because the build happens in a separate worktree. state.json is excluded:
+    # sync.py writes it on success, so leaving it modified between runs is
+    # expected.
+    touched = "\n".join(
+        line
+        for line in run(["git", "status", "--porcelain", "--", "tools/zh"], repo).stdout.splitlines()
+        if not line.rstrip().endswith("tools/zh/state.json")
+    ).strip()
     if touched:
         log("error: tools/zh has uncommitted changes; commit them first so the rebuild")
         log("       can read a known-good patch:")
