@@ -53,6 +53,16 @@ UPSTREAM_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 WORKFLOW_SRC_REL = "tools/zh/zh-release.yml"
 WORKFLOW_DST_REL = ".github/workflows/zh-release.yml"
 
+# The catalogue this fork carries. It is written to the *app repo* as plain
+# data: the fork's Chinese coverage is a superset of upstream's, so it is
+# carried here and merged with whatever the new upstream tag added. Without this
+# step a rebuilt branch would fall back to upstream's own (much smaller)
+# catalogue and the app would show English text again.
+CARRIER_EN_REL = "tools/zh/en.strings"
+CARRIER_ZH_REL = "tools/zh/zh-Hans.strings"
+APP_EN_REL = "KoeApp/Koe/en.lproj/Localizable.strings"
+APP_ZH_REL = "KoeApp/Koe/zh-Hans.lproj/Localizable.strings"
+
 # Files the localization touches, in the order used to regenerate the patch.
 PATCH_TARGETS = [
     "KoeApp/Koe/Overlay/SPOverlayPanel.m",
@@ -124,6 +134,79 @@ def print_conflict_help(worktree: Path, tag: str, conflicted: list[str]) -> None
     log(f"       git diff {tag} -- " + " \\\n         ".join(PATCH_TARGETS))
     log(f"       > {PATCH_REL}")
     log("       tools/zh/sync.py --force")
+
+
+def load_translate_module(repo: Path):
+    """Import tools/zh/translate.py so its parser/serializer is reused as-is."""
+    sys.path.insert(0, str(repo / "tools" / "zh"))
+    import translate  # type: ignore[import-not-found]
+
+    return translate
+
+
+def merge_catalogue(repo: Path, worktree: Path, tag: str) -> tuple[int, int]:
+    """Write this fork's catalogue into the rebuilt tag, keeping upstream's additions.
+
+    Returns (total_keys, newly_added_keys).
+
+    The fork's Chinese coverage is a superset of upstream's, so the carried
+    catalogue cannot simply overwrite the tag's file (that would drop whatever
+    new strings the tag introduced) nor be overwritten by it (that would drop
+    the fork's translations). Upstream's English file is authoritative for keys
+    it defines; keys only this fork knows are appended under their own heading.
+    """
+    translate = load_translate_module(repo)
+
+    carrier_en = parse_text(translate, repo / CARRIER_EN_REL)
+    carrier_zh = parse_text(translate, repo / CARRIER_ZH_REL)
+    upstream_en = parse_text(translate, worktree / APP_EN_REL)
+
+    upstream_keys = [k for k, _, _ in upstream_en]
+    carrier_keys = [k for k, _, _ in carrier_en]
+    extra = [k for k in carrier_keys if k not in set(upstream_keys)]
+    removed = [k for k in upstream_keys if k not in set(carrier_keys)]
+
+    # English: upstream verbatim, then this fork's additional keys.
+    upstream_text = (worktree / APP_EN_REL).read_text(encoding="utf-8").rstrip("\n")
+    extra_lines: list[str] = []
+    if extra:
+        extra_lines.append("")
+        extra_lines.append(f"/* ─── Added by this fork's Simplified Chinese localization ─── */")
+        for key in extra:
+            _, value, comments = next(e for e in carrier_en if e[0] == key)
+            extra_lines.extend(comments)
+            extra_lines.append(f'"{key}" = "{value}";')
+    while extra_lines and not extra_lines[-1].strip():
+        extra_lines.pop()
+    merged_en_keys = upstream_keys + extra
+
+    (worktree / APP_EN_REL).write_text(
+        upstream_text + "\n" + "\n".join(extra_lines) + "\n", encoding="utf-8"
+    )
+
+    # Chinese: this fork's translations, filtered to the merged key set. Keys the
+    # new tag added have no translation yet and are left for translate.py.
+    zh_by_key = {k: (v, c) for k, v, c in carrier_zh}
+    zh_lines: list[str] = []
+    for key in merged_en_keys:
+        if key not in zh_by_key:
+            continue
+        value, comments = zh_by_key[key]
+        zh_lines.extend(comments)
+        zh_lines.append(f'"{key}" = "{value}";')
+    (worktree / APP_ZH_REL).write_text("\n".join(zh_lines) + "\n", encoding="utf-8")
+
+    missing = len(merged_en_keys) - sum(1 for k in merged_en_keys if k in zh_by_key)
+    log(f"catalogue merged: {len(merged_en_keys)} keys total, "
+        f"{len(extra)} fork-only, {len(removed)} dropped upstream, {missing} to translate")
+    return len(merged_en_keys), missing
+
+
+def parse_text(translate, path: Path) -> list[tuple[str, str, list[str]]]:
+    entries, ok = translate.parse_strings(str(path))
+    if not ok:
+        raise RuntimeError(f"could not parse {path}")
+    return entries
 
 
 def main() -> int:
@@ -223,6 +306,15 @@ def main() -> int:
                 args.keep_worktree = True
             return 1
         log("localization patch applied cleanly")
+
+        # Merge this fork's catalogue in before translating: it carries the
+        # Chinese coverage upstream does not have, and merging first means a new
+        # upstream key is the only thing translate.py has left to do.
+        try:
+            merge_catalogue(repo, worktree, target_tag)
+        except Exception as exc:  # noqa: BLE001 - a missing carrier is fatal, report clearly
+            log(f"error: could not merge the localization catalogue: {exc}")
+            return 1
 
         # The zh branch is rebuilt from an upstream tag, which does not contain
         # this fork's workflow. A push only starts workflows defined in the ref
