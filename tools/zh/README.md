@@ -42,10 +42,12 @@ cd ~/code/koe && tools/zh/sync.py
 ### 2. 安装构建好的中文版
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你的账号>/koe/zh-tooling/tools/zh/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/$(gh api user --jq .login)/koe/zh-tooling/tools/zh/install.sh | bash
 ```
 
 它会问一次是否清除隔离标记（ad-hoc 签名的必要步骤），然后装到 `/Applications/Koe.app`。
+脚本自己会去 `<你的账号>/koe` 找 `zh-v*` release，不需要你改任何参数；
+要装到别的仓库就传 `KOE_ZH_REPO=owner/repo`。
 
 ### 3. 只看不推
 
