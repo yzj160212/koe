@@ -359,21 +359,39 @@ def main() -> int:
         log(f"installed workflow at {WORKFLOW_DST_REL}")
 
         if not args.skip_translate:
-            log("filling missing translations …")
-            proc = subprocess.run(
-                [sys.executable, str(repo / TRANSLATE_REL), "--repo", str(worktree)],
+            # Probe first: an unreachable gateway (the usual CI situation, since
+            # the local gateway is not routable from a runner) should fall back
+            # immediately instead of paying the full connection timeout.
+            probe = subprocess.run(
+                [sys.executable, str(repo / TRANSLATE_REL), "--repo", str(worktree), "--probe"],
                 cwd=str(repo),
+                capture_output=True,
                 text=True,
             )
-            if proc.returncode != 0:
+            gateway_up = probe.returncode == 0
+            log(f"gateway probe: {'reachable' if gateway_up else 'unreachable'} — {probe.stdout.strip()}")
+
+            translated_ok = False
+            if gateway_up:
+                log("filling missing translations …")
+                proc = subprocess.run(
+                    [sys.executable, str(repo / TRANSLATE_REL), "--repo", str(worktree)],
+                    cwd=str(repo),
+                    text=True,
+                )
+                translated_ok = proc.returncode == 0
+                if not translated_ok:
+                    log("translation did not complete")
+
+            if not translated_ok:
                 if not args.allow_untranslated:
-                    log("error: translation failed; nothing committed")
+                    log("error: translation unavailable; nothing committed")
                     return 1
-                # Unattended mode: a handful of untranslated keys still yields a
-                # usable Chinese app, whereas refusing to build yields nothing.
-                # Fill the gaps with the English source text and keep the build.
-                log("warning: translation failed — falling back to English text for the")
-                log("         remaining keys so the build can still ship")
+                # Unattended mode: a few untranslated keys still make a usable
+                # Chinese app; refusing to build makes nothing at all. Fill the
+                # gaps with the English source text and keep the build.
+                log("warning: falling back to English text for the remaining keys so")
+                log("         the build can still ship")
                 if not fill_untranslated(repo, worktree):
                     log("error: could not fill the untranslated keys either; nothing committed")
                     return 1
