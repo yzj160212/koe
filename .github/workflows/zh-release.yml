@@ -119,18 +119,40 @@ jobs:
           APP=/tmp/verify/Koe.app
           test -d "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
+
           echo "--- localization present ---"
           ls "$APP/Contents/Resources/" | grep -E "^(en|zh-Hans)\.lproj$"
-          test -f "$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
-          echo "--- zh catalogue key count ---"
-          grep -cE '^"' "$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+
+          # xcodebuild compiles .strings into a binary plist, so this has to be
+          # read with plutil rather than counted with grep. plutil accepts both
+          # encodings, so the check works either way.
+          PLIST="$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+          test -f "$PLIST"
+          ZH_KEYS=$(plutil -convert json -o - "$PLIST" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          EN_KEYS=$(plutil -convert json -o - "$APP/Contents/Resources/en.lproj/Localizable.strings" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          echo "zh-Hans keys: $ZH_KEYS   en keys: $EN_KEYS"
+          if [ "$ZH_KEYS" -ne "$EN_KEYS" ]; then
+            echo "::error::zh-Hans has $ZH_KEYS keys but en has $EN_KEYS — the app would show raw keys"
+            exit 1
+          fi
+          # Upstream's own catalogue is 69 keys; a build that fell back to it
+          # would mean the fork's catalogue never made it into the tag.
+          if [ "$ZH_KEYS" -lt 200 ]; then
+            echo "::error::only $ZH_KEYS Chinese keys — the fork's catalogue did not reach the build"
+            exit 1
+          fi
+
           echo "--- Sparkle neutralized ---"
           /usr/libexec/PlistBuddy -c "Print :SUEnableAutomaticChecks" "$APP/Contents/Info.plist"
           if /usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$APP/Contents/Info.plist" 2>/dev/null; then
             echo "::error::SUFeedURL is still present — the build could update itself to the English release"
             exit 1
           fi
-          echo "ok"
+          if /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$APP/Contents/Info.plist" 2>/dev/null; then
+            echo "::error::SUPublicEDKey is still present — Sparkle could still verify and install the upstream feed"
+            exit 1
+          fi
+          echo "ok — $ZH_KEYS Chinese strings, Sparkle disabled"
 
       - name: Upload to Release
         env:

@@ -48,7 +48,7 @@ UPSTREAM_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 # The build workflow lives on main with the rest of the tooling and is copied
 # into the rebuilt zh branch, because a push only triggers workflows that exist
 # in the pushed ref.
-WORKFLOW_SRC_REL = "tools/zh/zh-release.yml"
+WORKFLOW_SRC_REL = ".github/workflows/zh-release.yml"
 WORKFLOW_DST_REL = ".github/workflows/zh-release.yml"
 
 # The catalogue this fork carries. It is written to the *app repo* as plain

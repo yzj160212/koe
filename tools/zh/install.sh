@@ -52,7 +52,7 @@ codesign --verify --deep --strict "$APP" 2>/dev/null \
   || die "code signature check failed"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-KEYS="$(grep -cE '^"' "$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings")"
+KEYS="$(plutil -convert json -o - "$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 say "    Koe $VERSION, $KEYS Chinese strings, signature ok"
 
 if /usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$APP/Contents/Info.plist" >/dev/null 2>&1; then
