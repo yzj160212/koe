@@ -124,6 +124,20 @@ tools/zh/sync.py --force
 **如果这个 PR 被合并**，情况会大幅简化：代码侧接线由官方维护，本仓库就只剩
 一份中文词条数据要跟，冲突面基本归零。届时 `tools/zh/localize.patch` 可以删除。
 
+## 本机旧产物说明
+
+手工汉化时代的产物仍在磁盘上，**新流水线不依赖它们**，可以保留或自行清理：
+
+| 路径 | 内容 | 现状 |
+| --- | --- | --- |
+| `~/code/koe-zh/` | 旧中文版 app + 一次性补丁 | 补丁已失效（`git apply` 打不上），app 可作回滚备份 |
+| `~/code/koe-backup/Koe-1.0.33-original.app` | 官方原版备份 | 可回滚 |
+| `~/code/koe-backup/Koe-1.0.33-pre-pipeline.app` | 旧手工汉化版备份 | 可回滚 |
+| `/tmp/koe-local.entitlements`、`/tmp/koe-zh-localization.patch` 等 | 旧手工构建的中间文件 | `/tmp` 会自己清空，无需处理 |
+
+新流水线产出的 app 与旧手工版的差别：词条数 308（旧版 309，多的一条是无引用的孤儿 key）、
+`.strings` 在包内为二进制 plist（旧版因绕过 Xcode 而保持文本）。
+
 ## 文件说明
 
 | 文件 | 作用 |
